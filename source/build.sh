@@ -33,10 +33,12 @@ prefix_from_cmake() {
 }
 
 # 在给定前缀下找 Trilinos 的 cmake 配置目录，成功则打印该目录
+# 兼容两种布局：<prefix>/lib/cmake/Trilinos/... 与 <prefix>/include/TrilinosConfig.cmake
 tril_cmake_in() {
   local p="${1:-}" sub
   [ -n "$p" ] || return 1
-  for sub in lib/cmake/Trilinos lib64/cmake/Trilinos share/trilinos/cmake share/cmake/Trilinos; do
+  if [ -f "$p/TrilinosConfig.cmake" ]; then echo "$p"; return 0; fi
+  for sub in include lib/cmake/Trilinos lib64/cmake/Trilinos share/trilinos/cmake share/cmake/Trilinos; do
     if [ -f "$p/$sub/TrilinosConfig.cmake" ]; then echo "$p/$sub"; return 0; fi
   done
   return 1
@@ -68,8 +70,8 @@ TRILINOS_PREFIX=""
 detect_trilinos() {
   local p c f d
 
-  # 1) 显式环境变量
-  for p in "${TRILINOS_DIR:-}" "${TRILINOS_ROOT:-}" "${TRILINOS_HOME:-}" "${TRILINOS_PREFIX:-}"; do
+  # 1) 显式环境变量（含 CMake 风格的 Trilinos_DIR）
+  for p in "${Trilinos_DIR:-}" "${TRILINOS_DIR:-}" "${TRILINOS_ROOT:-}" "${TRILINOS_HOME:-}" "${TRILINOS_PREFIX:-}" "${Trilinos_ROOT:-}"; do
     [ -n "$p" ] || continue
     if c="$(tril_cmake_in "$p")"; then TRILINOS_CMAKE="$c"; TRILINOS_PREFIX="$p"; return 0; fi
   done
@@ -142,7 +144,7 @@ fi
 say "trilinos: $TRILINOS_PREFIX"
 say "TriCMake: $TRILINOS_CMAKE"
 
-export LD_LIBRARY_PATH="$DTK_ROOT/lib:$DTK_ROOT/lib64:$TRILINOS_PREFIX/lib:$TRILINOS_PREFIX/lib64:$ROOT/lib:${LD_LIBRARY_PATH:-}"
+export LD_LIBRARY_PATH="$DTK_ROOT/lib:$DTK_ROOT/lib64:$TRILINOS_PREFIX/lib:$TRILINOS_PREFIX/lib64:$(dirname "$TRILINOS_PREFIX")/lib:$(dirname "$TRILINOS_PREFIX")/lib64:$ROOT/lib:${LD_LIBRARY_PATH:-}"
 export OMP_NUM_THREADS="${OMP_NUM_THREADS:-8}"
 export OPENBLAS_NUM_THREADS="${OPENBLAS_NUM_THREADS:-1}"
 export AMDGPU_TARGETS="$DCU_ARCH"
