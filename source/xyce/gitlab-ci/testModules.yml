@@ -1,0 +1,72 @@
+include:
+  - gitlab-ci/variables/build-var-sets.yml
+  
+.test_modules:
+  stage: testModules
+  dependencies: []
+  variables:
+    GIT_STRATEGY: none
+  rules:
+    - if: '$DO_TEST_MODULES == "true" && $CI_PIPELINE_SOURCE == "trigger"'
+
+.test_modules_serial:
+  extends:
+    - .test_modules
+  script:
+    - |
+      module use ${BaseModuleInstallDir}/${Platform}
+      module purge
+      module load xyce/${XYCE_INSTALL_STRING}/${CompilerSuite}/serial
+      which Xyce
+      Xyce -capabilities
+
+.test_modules_mpi:
+  extends:
+    - .test_modules
+  script:
+    - |
+      module use ${BaseModuleInstallDir}/${Platform}
+      module purge
+      module load xyce/${XYCE_INSTALL_STRING}/${CompilerSuite}/parallel
+      which Xyce
+      mpirun -np 1 Xyce -capabilities
+
+GNU_serial.testModule:
+  extends:
+    - .test_modules_serial
+    - .gnu_serial_vars
+
+GNU_OpenMPI.testModule:
+  extends:
+    - .test_modules_mpi
+    - .gnu_openmpi_vars
+
+Intel_serial.testModule:
+  extends:
+    - .test_modules_serial
+    - .intel_serial_vars
+
+Intel_OpenMPI.testModule:
+  extends:
+    - .test_modules_mpi
+    - .intel_openmpi_vars
+
+GNU_serial.cts.testModule:
+  extends:
+    - .test_modules_serial
+    - .gnu_serial_cts_vars
+
+GNU_OpenMPI.cts.testModule:
+  extends:
+    - .test_modules_mpi
+    - .gnu_openmpi_cts_vars
+    
+Intel_serial.cts.testModule:
+  extends:
+    - .test_modules_serial
+    - .intel_serial_cts_vars
+
+Intel_OpenMPI.cts.testModule:
+  extends:
+    - .test_modules_mpi
+    - .intel_openmpi_cts_vars

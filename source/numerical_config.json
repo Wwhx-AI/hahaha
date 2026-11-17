@@ -1,0 +1,47 @@
+{
+  "comment": "本地自测数值配置；正式评分由组委会 harness 用官方口径独立计算",
+  "tolerance": {
+    "relative_R": 1e-7,
+    "absolute_voltage_A_V": 1e-10,
+    "absolute_current_A_I": 1e-12,
+    "scaled_error_formula": "E = max|x - xCPU| / (A + R * |xCPU|), E <= 1 判通过"
+  },
+  "waveform": {
+    "file": "waveform.csv",
+    "time_column": "TIME",
+    "count": 101,
+    "t_start_ns": 0,
+    "t_stop_ns": 100,
+    "nominal_step_ns": 1,
+    "time_match_tolerance_s": 1e-17,
+    "requirements": [
+      "TIME 列非负且严格递增",
+      "物理量按列名匹配，忽略大小写、顺序任意",
+      "可附 INDEX 列",
+      "全部数值必须有限，NaN/Inf/缺失判失败"
+    ]
+  },
+  "public_cases": [
+    {"name": "practice_mesh", "model": "8x8 RC", "voltage_cols": 64, "current_cols": 1},
+    {"name": "practice_rect", "model": "6x10 anisotropic RC", "voltage_cols": 60, "current_cols": 1},
+    {"name": "practice_multifeed", "model": "7x5 multi-feed RC", "voltage_cols": 35, "current_cols": 2}
+  ],
+  "solver": {
+    "name": "DCUGMRES",
+    "command_line": "bin/Xyce -linsolv DCUGMRES grid.cir",
+    "restart": 30,
+    "max_iter": 500,
+    "tolerance": 1e-10,
+    "preconditioner": "jacobi"
+  },
+  "environment": {
+    "os": "Ubuntu 22.04.5 x86_64",
+    "dtk": "26.04",
+    "hip_dcc": "25.10.0",
+    "dcu_arch": "gfx936",
+    "gcc": "11.4.0",
+    "cmake": "3.29.2",
+    "ninja": "1.10.1",
+    "trilinos": "15.1.1"
+  }
+}

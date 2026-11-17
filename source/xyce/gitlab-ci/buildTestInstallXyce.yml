@@ -1,0 +1,181 @@
+include:
+  - gitlab-ci/variables/build-var-sets.yml
+
+.build_test_install_xyce:
+  extends: .build_base
+  stage: buildTestInstallXyce
+  dependencies: []
+  variables:
+    GoogleUnitTesting: "OFF"
+    XYCE_NO_TRACKING: "TRUE"
+    BuildWithMPI: "OFF"
+    cmakeBuildType: "Release"
+    # variables for xyce-ctest.cmake. typically do NOT want to modify
+    # these
+    branch: ${XyceBranch}
+    TESTSET: Experimental
+    WORKSPACE: $CI_PROJECT_DIR
+    GTest_ROOT: /projects/xyce/GTest/RHEL7
+    ExcludeTestLabel: ""
+    JUnitResultsFile: "junit-test-results.xml"
+    cmakeArgsList: |
+      --log-level=DEBUG;
+      -DXyce_REGRESSION=ON;
+      -DXyce_USE_FFT=ON;
+      -DXyce_PLUGIN_SUPPORT=BLD_SHARED_TEMPLATE;
+      -DBUILD_SHARED_LIBS=BLD_SHARED_TEMPLATE;
+      -DCMAKE_BUILD_TYPE=${cmakeBuildType};
+      -DBUILD_TESTING=ON;
+      -DXyce_GTEST_UNIT_TESTS=${GoogleUnitTesting};
+      -DXyce_PARALLEL_MPI=${BuildWithMPI};
+      -DXyce_RAD_MODELS=ON;
+      -DXyce_USE_CURL=ON;
+      -DXyce_TRACKING_URL=http://morannon.sandia.gov/Xyce_Stats/cgi-bin/collectstats.pl;
+      -DXyce_AS_SPECIAL_CHARON_TPL=OFF;
+      -DCMAKE_INSTALL_PREFIX=${xyceInstallDir}
+  script:
+    - set -euo pipefail
+    - hostname
+    # activate python virtual for xyce build and test
+    - source /projects/xyce_user/pythonVirtEnv/Xyce/bin/activate
+    - cloneAllXyceRepos
+    # so admsXml will be found
+    - export PATH="${PATH}:${admsInstallDir}/${optStr}/bin"
+    # remove  and newline characters from list for proper
+    # parsing by ctest script
+    - rawCmakeArgsList=$(echo ${cmakeArgsList} | sed "s/BLD_SHARED_TEMPLATE/${buildShared}/g" | tr -d '\n' | sed s/'; '/';'/g)
+    - printf "##%s##\n" "${rawCmakeArgsList}"
+    # this appears on the dashboard under "Build Name"
+    - export MYBUILDNAME=Xyce/${XYCE_INSTALL_STRING}/${optStr}/${libTypeStr}-${archFullName}
+    - echo "MYBUILDNAME=${MYBUILDNAME}"
+    # only doing links against dynamic libraries for now
+    - export Trilinos_DIR=${trilinosInstallDir}/${optStr}/${libTypeStr}
+    - echo "Trilinos_DIR=${Trilinos_DIR}"
+    # note use of the use of the pipeline's xyce-ctest.cmake file, NOT
+    # the build repos copy
+    - |
+      ctest --timeout 600 \
+        --output-junit "${CI_PROJECT_DIR}/${JUnitResultsFile}" \
+        -DVERBOSITY=5 \
+        -C ${cmakeBuildType} \
+        -DUSE_GITLAB_CI_TESTING=ON \
+        -DEXCLUDE_TESTS_WITH_LABEL="${ExcludeTestLabel}" \
+        -DCMAKE_ARGS_LIST="${rawCmakeArgsList}" \
+        -S ${CI_PROJECT_DIR}/cmake/ctest/xyce-ctest.cmake
+    # clean out the installation directory
+    - cleanInstallDir "${xyceInstallDir}"
+    - cmake --install ${CI_PROJECT_DIR}/repos/build --config ${cmakeBuildType}
+  artifacts:
+    paths:
+      - ${JUnitResultsFile}
+      - repos/build
+      - slurm*.out
+    expire_in: 1 month
+    exclude:
+      - repos/build/**/*.o
+      - repos/build/**/*.so*
+      - repos/build/**/*.a
+      - repos/build/**/*.d
+      - repos/build/**/Xyce
+    reports:
+      junit: ${JUnitResultsFile}
+    when: always
+  rules:
+    - if: '$DO_XYCE_BUILDS == "true" && $CI_PIPELINE_SOURCE == "trigger"'
+  
+# Begin concrete gitlab CI stages
+GNU_serial.buildTestInstallXyce:
+  needs:
+    - job: GNU_serial.buildTPLs
+      parallel:
+        matrix:
+          - buildShared: "ON"
+            cmakeBuildType: "Release"
+      artifacts: false
+      optional: true
+  extends:
+    - .build_test_install_xyce
+    - .gnu_serial_vars
+
+GNU_OpenMPI.buildTestInstallXyce:
+  needs:
+    - job: GNU_OpenMPI.buildTPLs
+      parallel:
+        matrix:
+          - buildShared: "ON"
+            cmakeBuildType: "Release"
+      artifacts: false
+      optional: true
+  extends:
+    - .build_test_install_xyce
+    - .gnu_openmpi_vars
+  variables:
+     ExcludeTestLabel: "timesensitive"
+
+Intel_serial.buildTestInstallXyce:
+  needs:
+    - job: Intel_serial.buildTPLs
+      parallel:
+        matrix:
+          - buildShared: "ON"
+            cmakeBuildType: "Release"
+      artifacts: false
+      optional: true
+  extends:
+    - .build_test_install_xyce
+    - .intel_serial_vars
+
+Intel_OpenMPI.buildTestInstallXyce:
+  needs:
+    - job: Intel_OpenMPI.buildTPLs
+      parallel:
+        matrix:
+          - buildShared: "ON"
+            cmakeBuildType: "Release"
+      artifacts: false
+      optional: true
+  extends:
+    - .build_test_install_xyce
+    - .intel_openmpi_vars
+  variables:
+     ExcludeTestLabel: "timesensitive"
+
+GNU_OpenMPI.cts.buildTestInstallXyce:
+  needs:
+    - job: GNU_OpenMPI.cts.buildTPLs
+      artifacts: false
+      optional: true
+  extends:
+    - .build_test_install_xyce
+    - .gnu_openmpi_cts_vars
+  variables:
+    ExcludeTestLabel: "timesensitive"
+
+GNU_serial.cts.buildTestInstallXyce:
+  needs:
+    - job: GNU_serial.cts.buildTPLs
+      artifacts: false
+      optional: true
+  extends:
+    - .build_test_install_xyce
+    - .gnu_serial_cts_vars
+
+Intel_OpenMPI.cts.buildTestInstallXyce:
+  needs:
+    - job: Intel_OpenMPI.cts.buildTPLs
+      artifacts: false
+      optional: true
+  extends:
+    - .build_test_install_xyce
+    - .intel_openmpi_cts_vars
+  variables:
+    ExcludeTestLabel: "timesensitive"
+
+Intel_serial.cts.buildTestInstallXyce:
+  needs:
+    - job: Intel_serial.cts.buildTPLs
+      artifacts: false
+      optional: true
+  extends:
+    - .build_test_install_xyce
+    - .intel_serial_cts_vars

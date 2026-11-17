@@ -1,0 +1,16 @@
+# 构建产物与本地中间文件（不提交）
+build/
+bin/*
+!bin/.gitkeep
+lib/*
+!lib/.gitkeep
+
+# 编译中间/产物
+*.obj
+*.o
+*.a
+*.so
+*.exe
+*.lib
+*.ilk
+*.pdb

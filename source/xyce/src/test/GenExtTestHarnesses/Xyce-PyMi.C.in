@@ -1,0 +1,945 @@
+//-------------------------------------------------------------------------
+//   Copyright 2002-2026 National Technology & Engineering Solutions of
+//   Sandia, LLC (NTESS).  Under the terms of Contract DE-NA0003525 with
+//   NTESS, the U.S. Government retains certain rights in this software.
+//
+//   This file is part of the Xyce(TM) Parallel Electronic Simulator.
+//
+//   Xyce(TM) is free software: you can redistribute it and/or modify
+//   it under the terms of the GNU General Public License as published by
+//   the Free Software Foundation, either version 3 of the License, or
+//   (at your option) any later version.
+//
+//   Xyce(TM) is distributed in the hope that it will be useful,
+//   but WITHOUT ANY WARRANTY; without even the implied warranty of
+//   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+//   GNU General Public License for more details.
+//
+//   You should have received a copy of the GNU General Public License
+//   along with Xyce(TM).
+//   If not, see <http://www.gnu.org/licenses/>.
+//-------------------------------------------------------------------------
+
+//-------------------------------------------------------------------------
+//
+// Purpose        : Driver for Python Model Interpreter
+//
+// Special Notes  : Used by the Python Model Interpreter test cases
+//
+// Creator        : Paul Kuberry
+//
+// Creation Date  : 10 October 2020
+//
+//-------------------------------------------------------------------------
+// See comments at top of "main" function for details.
+
+#include <Xyce_config.h>
+#include <N_CIR_GenCouplingSimulator.h>
+#include <N_DEV_VectorComputeInterfaceWithLimiting.h>
+#include <N_IO_ExtOutInterface.h>
+#include <N_DEV_DeviceOptions.h>
+#include <N_DEV_SolverState.h>
+#include <N_UTL_Expression.h>
+#include <iostream>
+#include <fstream>
+#include <iomanip>
+
+#include <nanobind/nanobind.h>
+#include <nanobind/stl/string.h>
+#include <nanobind/ndarray.h>
+#include <nanobind/eval.h>
+#include <Python.h>
+
+namespace nb = nanobind;
+using namespace nb::literals;
+
+// wrapper for DeviceOptions and SolverState
+NB_MODULE(XyceObjects, m) {
+    m.attr("__version__") = "@Xyce_VERSION_MAJOR@.@Xyce_VERSION_MINOR@";
+
+    nb::class_<Xyce::Device::DeviceOptions>(m, "DeviceOptions")
+        .def_ro("voltageLimiterFlag",
+                &Xyce::Device::DeviceOptions::voltageLimiterFlag);
+
+    nb::class_<Xyce::Device::SolverState>(m, "SolverState")
+        .def_ro("pdt_", &Xyce::Device::SolverState::pdt_)
+        .def_ro("currentOrder_", &Xyce::Device::SolverState::currentOrder_)
+        .def_ro("usedOrder_", &Xyce::Device::SolverState::usedOrder_)
+        .def_ro("currTimeStep_", &Xyce::Device::SolverState::currTimeStep_)
+        .def_ro("lastTimeStep_", &Xyce::Device::SolverState::lastTimeStep_)
+        .def_ro("currTime_", &Xyce::Device::SolverState::currTime_)
+        .def_ro("acceptedTime_", &Xyce::Device::SolverState::acceptedTime_)
+        .def_ro("newtonIter", &Xyce::Device::SolverState::newtonIter)
+        .def_ro("initJctFlag_", &Xyce::Device::SolverState::initJctFlag_)
+        .def_ro("inputOPFlag", &Xyce::Device::SolverState::inputOPFlag)
+        .def_ro("dcopFlag", &Xyce::Device::SolverState::dcopFlag)
+        .def_ro("transientFlag", &Xyce::Device::SolverState::transientFlag)
+        .def_ro("dcsweepFlag", &Xyce::Device::SolverState::dcsweepFlag)
+        .def_ro("tranopFlag", &Xyce::Device::SolverState::tranopFlag)
+        .def_ro("acopFlag", &Xyce::Device::SolverState::acopFlag)
+        .def_ro("noiseFlag", &Xyce::Device::SolverState::noiseFlag)
+        .def_ro("locaEnabledFlag", &Xyce::Device::SolverState::locaEnabledFlag);
+}
+
+template <typename T>
+nb::list get_list_of_memoryviews(std::vector<std::vector<T> > & stdvec_2d) {
+    T null_value = 0;
+    nb::list py_list_mv;
+    for (size_t i = 0; i < stdvec_2d.size(); ++i) {
+        T* data_ptr = stdvec_2d[i].data() ? stdvec_2d[i].data() : &null_value;
+        size_t shape[1] = { stdvec_2d[i].size() };
+        nb::capsule dummy_owner;
+        auto array = nb::ndarray<T, nb::numpy>(
+            data_ptr,    // data pointer
+            1,           // number of dimensions
+            shape,       // shape of array
+            dummy_owner  // C++ manages memory
+        );
+        py_list_mv.append(nb::cast(array, nb::rv_policy::reference));
+    }
+    return py_list_mv;
+}
+
+template <typename T>
+nb::ndarray<T, nb::numpy> get_np_from_contiguous_std_vec_2d(std::vector<T> & stdvec_2d, const int rows, const int cols) {
+    T null_value = 0;
+    T* data_ptr = stdvec_2d.data() ? stdvec_2d.data() : &null_value;
+    size_t shape[2] = { static_cast<size_t>(rows), static_cast<size_t>(cols) };
+    nb::capsule dummy_owner;
+    return nb::ndarray<T, nb::numpy>(
+        data_ptr,           // data pointer
+        2,                  // number of dimensions
+        shape,              // shape of array
+        dummy_owner         // C++ manages memory
+    );
+}
+
+template <typename T>
+nb::ndarray<T, nb::numpy> get_np_from_std_vec_1d(std::vector<T> & stdvec_1d) {
+    T null_value = 0;
+    T* data_ptr = stdvec_1d.data() ? stdvec_1d.data() : &null_value;
+    size_t shape[1] = { stdvec_1d.size() };
+    nb::capsule dummy_owner;
+    return nb::ndarray<T, nb::numpy>(
+        data_ptr,           // data pointer
+        1,                  // number of dimensions
+        shape,              // shape of array
+        dummy_owner         // C++ manages memory
+    );
+}
+
+template <typename T>
+nb::ndarray<T, nb::numpy> get_np_from_scalar(T & ref_scalar) {
+    T* data_ptr = &ref_scalar;
+    size_t shape[1] = { 1 };
+    nb::capsule dummy_owner;
+    return nb::ndarray<T, nb::numpy>(
+        data_ptr,           // data pointer
+        1,                  // number of dimensions
+        shape,              // shape of array
+        dummy_owner         // C++ manages memory
+    );
+}
+
+class pythonVectorCompute : public Xyce::Device::VectorComputeInterfaceWithLimiting
+{
+private:
+  std::string modulename_;
+  std::string xyce_filepath_;
+  std::string netlist_filepath_;
+  nb::object device;
+
+  nb::object py_func_computeXyceVectors;
+
+  nb::dict b_params;
+  nb::dict d_params;
+  nb::dict i_params;
+  nb::dict s_params;
+  nb::dict F_Q_B_dFdX_dQdX_sizes;
+
+  nb::object py_np_flagSolV;
+  nb::object py_np_F;
+  nb::object py_np_Q;
+  nb::object py_np_B;
+  nb::object py_np_dFdX;
+  nb::object py_np_dQdX;
+  nb::object py_np_dFdXdVp;
+  nb::object py_np_dQdXdVp;
+  nb::object py_np_origFlag;
+
+  nb::object py_xyceDeviceOptions;
+  nb::object py_xyceSolverState;
+
+  std::vector<double> dFdX_internal;
+  std::vector<double> dQdX_internal;
+
+  nb::list py_solV;
+  nb::list py_stoV;
+  nb::list py_staV;
+  nb::list py_jacStamp;
+
+  // handles (for performance)
+  nb::handle h_py_computeXyceVectors;
+
+  bool s_params_loaded;
+  bool p_params_loaded;
+  bool jacStampSet;
+
+public:
+
+  std::vector< std::vector<int> > jacStamp;
+  std::vector<double> errorWeightMask;
+
+  int numExternalVars;
+  int numInternalVars;
+  int numStateVars;
+  int numStoreVars;
+  int numBranchDataVars;
+  int numBranchDataVarsIfAllocated;
+  int origFlag;
+
+  pythonVectorCompute() :
+        s_params_loaded(false), p_params_loaded(false), jacStampSet(false),
+        numExternalVars(0), numInternalVars(0), numStateVars(0), numStoreVars(0),
+        numBranchDataVars(0), numBranchDataVarsIfAllocated(0), origFlag(0)
+  {}
+
+  virtual bool computeXyceVectorsWithLimiting(
+                          std::vector<double>& flagSolV,
+                          std::vector<std::vector<double> >& solV, 
+                          std::vector<std::vector<double> >& stoV, 
+                          std::vector<std::vector<double> >& staV, 
+                          const Xyce::Device::DeviceOptions & xyceDeviceOptions,
+                          const Xyce::Device::SolverState & xyceSolverState,
+                          bool& origFlag_,
+                          std::vector<double> & F,
+                          std::vector<double> & Q,
+                          std::vector<double> & B,
+                          std::vector<std::vector<double> > & dFdX,
+                          std::vector<std::vector<double> > & dQdX,
+                          std::vector<double> & dFdXdVp,
+                          std::vector<double> & dQdXdVp)
+  {
+
+    assert(s_params_loaded);
+    assert(p_params_loaded);
+    assert(jacStampSet);
+
+    if (F_Q_B_dFdX_dQdX_sizes.size()==0) {
+
+        py_xyceDeviceOptions = nb::cast(&xyceDeviceOptions, nb::rv_policy::reference);
+        py_xyceSolverState = nb::cast(&xyceSolverState, nb::rv_policy::reference);
+
+        // get sizes from Python module
+        F_Q_B_dFdX_dQdX_sizes = nb::cast<nb::dict>(device.attr("_pymi_bind")("getArraySizes")());
+
+        auto F_size = nb::cast<int>(nb::cast<nb::list>(F_Q_B_dFdX_dQdX_sizes["F"])[0]);
+        auto Q_size = nb::cast<int>(nb::cast<nb::list>(F_Q_B_dFdX_dQdX_sizes["Q"])[0]);
+        auto B_size = nb::cast<int>(nb::cast<nb::list>(F_Q_B_dFdX_dQdX_sizes["B"])[0]);
+
+        // user can only set F size to numVars, while Q and B can be set to 
+        // either 0 or numVars
+        //
+        // if Q,B sizes !=0, then N_DEV_GeneralExternal.C expects them to be of size
+        // numVars, which is the same size as the length of solV
+        //
+        // check sizes for validity
+        auto numVars = solV[0].size();
+        assert(F_size==numVars);
+        if (Q_size!=0) {
+            assert(Q_size==numVars);
+        }
+        if (B_size!=0) {
+            assert(B_size==numVars);
+        }
+
+        // resize vectors, if needed 
+        {
+            // F
+            if (F.size()!=F_size) {
+                F.resize(F_size);
+            }
+            // limited variable F
+            if (dFdXdVp.size()!=F_size) {
+                dFdXdVp.resize(F_size);
+            }
+
+            // Q
+            if (Q.size()!=Q_size) {
+                Q.resize(Q_size);
+            }
+            // limited Q
+            if (dQdXdVp.size()!=Q_size) {
+                dQdXdVp.resize(Q_size);
+            }
+
+            // B
+            if (B.size()!=B_size) {
+                B.resize(B_size);
+            }
+        }
+
+        // resize gradients, if needed
+        {
+            if (dFdX.size()!=F_size) {
+                dFdX.resize(F_size);
+            }
+            if (dQdX.size()!=Q_size) {
+                dQdX.resize(Q_size);
+            }
+            for (size_t i=0; i<F_size; ++i) {
+                if (dFdX[i].size()!=F_size) {
+                    dFdX[i].resize(F_size);
+                }
+            }
+            for (size_t i=0; i<Q_size; ++i) {
+                if (dQdX[i].size()!=Q_size) {
+                    dQdX[i].resize(Q_size);
+                }
+            }
+            if (dFdX_internal.size()!=F_size*F_size) {
+                dFdX_internal.resize(F_size*F_size);
+            }
+            if (dQdX_internal.size()!=Q_size*Q_size) {
+                dQdX_internal.resize(Q_size*Q_size);
+            }
+        }
+
+        origFlag = origFlag_;
+
+        py_np_flagSolV = nb::cast(get_np_from_std_vec_1d(flagSolV), nb::rv_policy::reference);
+        py_np_F = nb::cast(get_np_from_std_vec_1d(F), nb::rv_policy::reference);
+        py_np_Q = nb::cast(get_np_from_std_vec_1d(Q), nb::rv_policy::reference);
+        py_np_B = nb::cast(get_np_from_std_vec_1d(B), nb::rv_policy::reference);
+        py_np_dFdXdVp = nb::cast(get_np_from_std_vec_1d(dFdXdVp), nb::rv_policy::reference);
+        py_np_dQdXdVp = nb::cast(get_np_from_std_vec_1d(dQdXdVp), nb::rv_policy::reference);
+        py_np_dFdX = nb::cast(get_np_from_contiguous_std_vec_2d(dFdX_internal, F_size, F_size), nb::rv_policy::reference);
+        py_np_dQdX = nb::cast(get_np_from_contiguous_std_vec_2d(dQdX_internal, Q_size, Q_size), nb::rv_policy::reference);
+        py_np_origFlag = nb::cast(get_np_from_scalar(origFlag), nb::rv_policy::reference);
+
+        // allocates new buffers for each row from heap
+        py_solV = get_list_of_memoryviews(solV);
+        py_stoV = get_list_of_memoryviews(stoV);
+        py_staV = get_list_of_memoryviews(staV);
+
+        device.attr("deviceOptions") = py_xyceDeviceOptions;
+        device.attr("solverState") = py_xyceSolverState;
+        nb::object result = device.attr("_pymi_bind")("initialize")();
+
+        // Bind computeXyceVectors through the backwards-compat adapter once
+        // and cache the resulting zero-arg callable; the hot load path below
+        // then invokes it with no per-call signature inspection.
+        py_func_computeXyceVectors = device.attr("_pymi_bind")("computeXyceVectors");
+        h_py_computeXyceVectors = py_func_computeXyceVectors.ptr();
+
+        // Provision the compute inputs as attributes on the device; the
+        // Python computeXyceVectors reads them from self.* (and the
+        // backwards-compat adapter feeds legacy signatures from the same).
+        device.attr("fSV") = py_np_flagSolV;
+        device.attr("F") = py_np_F;
+        device.attr("Q") = py_np_Q;
+        device.attr("B") = py_np_B;
+        device.attr("dFdX") = py_np_dFdX;
+        device.attr("dQdX") = py_np_dQdX;
+        device.attr("dFdXdVp") = py_np_dFdXdVp;
+        device.attr("dQdXdVp") = py_np_dQdXdVp;
+        device.attr("origFlag") = py_np_origFlag;
+        device.attr("solV") = py_solV;
+        device.attr("stoV") = py_stoV;
+        device.attr("staV") = py_staV;
+    }
+
+    // Invoke the cached, backwards-compat-adapted computeXyceVectors.
+    // Inputs are passed via attributes set on the device (see above), so
+    // the call itself takes no arguments.
+    h_py_computeXyceVectors();
+    origFlag_ = (bool)(origFlag);
+
+    if (jacStamp.size() > 0) {
+        // copy internal gradient representations back to Xyce representations
+        for (int i = 0; i<dFdX.size(); i++)
+        {
+            for (int j = 0; j<jacStamp[i].size(); j++)
+            {
+                // C - row major ordering
+                dFdX[i][jacStamp[i][j]] = dFdX_internal[i*dFdX[0].size() + jacStamp[i][j]];
+            }
+        }
+        for (int i = 0; i<dQdX.size(); i++)
+        {
+            for (int j = 0; j<jacStamp[i].size(); j++)
+            {
+                // C - row major ordering
+                dQdX[i][jacStamp[i][j]] = dQdX_internal[i*dQdX[0].size() + jacStamp[i][j]];
+            }
+        }
+    } else {
+        // copy internal gradient representations back to Xyce representations
+        for (int i = 0; i<dFdX.size(); i++)
+        {
+            for (int j = 0; j<dFdX[i].size(); j++)
+            {
+                // C - row major ordering
+                dFdX[i][j] = dFdX_internal[i*dFdX[0].size() + j];
+            }
+        }
+        for (int i = 0; i<dQdX.size(); i++)
+        {
+            for (int j = 0; j<dQdX[i].size(); j++)
+            {
+                // C - row major ordering
+                dQdX[i][j] = dQdX_internal[i*dQdX[0].size() + j];
+            }
+        }
+
+    }
+
+    return true;
+  };
+
+  void processBoolParams(std::vector<std::string> &pNames,
+                           std::vector<bool> &pValues)
+  {
+    for (int i = 0; i<pNames.size(); i++)
+    {
+      b_params[pNames[i].c_str()] = pValues[i] ? 1 : 0;
+    }
+  };
+
+  void processIntegerParams(std::vector<std::string> &pNames,
+                           std::vector<int> &pValues)
+  {
+    for (int i = 0; i<pNames.size(); i++)
+    {
+      i_params[pNames[i].c_str()] = pValues[i];
+    }
+  };
+
+  void processDoubleParams(std::vector<std::string> &pNames,
+                           std::vector<double> &pValues)
+  {
+    for (int i = 0; i<pNames.size(); i++)
+    {
+      d_params[pNames[i].c_str()] = pValues[i];
+    }
+  };
+
+  void processStringParams(std::vector<std::string> &pNames,
+                           std::vector<std::string> &pValues)
+  {
+    for (int i = 0; i<pNames.size(); i++)
+    {
+      if (pNames[i] == "MODULENAME")
+      {
+        // breaks path into directory + python module name
+        // adds directory to path then imports python module
+        // stores python module as "module"
+        modulename_ = pValues[i];
+
+        nb::module_ os = nb::module_::import_("os");
+        nb::module_ sys = nb::module_::import_("sys");
+        auto locals = nb::dict();
+        locals["basename"]="";
+        locals["executable_dirname"]=xyce_filepath_;
+        locals["cwd_dirname"]="";
+        locals["netlist_module_dirname"]=modulename_;
+        locals["netlist_dirname"]=netlist_filepath_;
+        locals["install_dirname"]="@CMAKE_INSTALL_PREFIX@/include/pymi";
+        locals["source_dirname"]="@CMAKE_SOURCE_DIR@/utils/PythonModelInterface";
+        nb::object main_module = nb::module_::import_("__main__");
+        nb::dict globals = main_module.attr("__dict__");
+        nb::exec(R"(
+            import os
+            import sys
+            cwd_dirname = os.getcwd()
+
+            # priority for python files are (in reverse order)
+
+            # 5.) source directory
+            if source_dirname not in sys.path: sys.path.insert(0, source_dirname)
+
+            # 4.) install directory
+            if install_dirname not in sys.path: sys.path.insert(0, install_dirname)
+
+            # 3.) directory of executable
+            if os.path.isabs(executable_dirname):
+                executable_dirname = os.path.dirname(executable_dirname)
+            else:
+                executable_dirname = cwd_dirname + os.sep + os.path.dirname(executable_dirname)
+            if executable_dirname not in sys.path: sys.path.insert(0, executable_dirname)
+
+            # 2.) current working directory
+            if cwd_dirname not in sys.path: sys.path.insert(0, cwd_dirname)
+
+            # 1.) directory of module file specified, relative to netlist directory if relative
+            if os.path.isabs(netlist_dirname):
+                netlist_dirname = os.path.dirname(netlist_dirname)
+            else:
+                netlist_dirname = cwd_dirname + os.sep + os.path.dirname(netlist_dirname)
+
+            basename = os.path.splitext(os.path.basename(netlist_module_dirname))[0]
+            if os.path.isabs(netlist_module_dirname):
+                netlist_module_dirname = os.path.dirname(netlist_module_dirname)
+            else:
+                netlist_module_dirname = netlist_dirname + os.sep + os.path.dirname(netlist_module_dirname)
+            if netlist_module_dirname not in sys.path: sys.path.insert(0, netlist_module_dirname)
+
+        )", globals, locals);
+        auto basename = nb::cast<std::string>(locals["basename"]);
+        s_params["NETLIST_PATH"] = nb::cast<std::string>(locals["netlist_dirname"]);
+        device = nb::module_::import_(basename.c_str()).attr("Device")();
+      } else {
+        s_params[pNames[i].c_str()] = pValues[i];
+      }
+    }
+    if (!device) {
+      printf("SPARAMS parsed, but MODULENAME=string(\"/path\") not found.\n");
+      exit(1);
+    } else {
+      device.attr("b_params") = b_params;
+      device.attr("d_params") = d_params;
+      device.attr("i_params") = i_params;
+      device.attr("s_params") = s_params;
+    }
+    s_params_loaded = true;
+  };
+
+  void processPythonParams()
+  {
+
+    // s_params must be loaded first (which is where the module is loaded)
+    assert(s_params_loaded);
+
+    // retrieve dictionary of parameters from Python device
+    device.attr("_pymi_bind")("processPythonParams")();
+    p_params_loaded = true;
+
+  }
+
+  void setNumExternalVars(const int num_vars)
+  {
+
+    // parameters should be processed first
+    assert(p_params_loaded);
+
+    numExternalVars = num_vars;
+
+    // propagate this to python dictionaries
+    device.attr("i_params")["numExternalVars"] = numExternalVars;
+
+  }
+
+  void setFilePaths(const std::string xyce_filepath, const std::string netlist_filepath)
+  {
+      xyce_filepath_ = xyce_filepath;
+      netlist_filepath_ = netlist_filepath;
+  }
+
+  void processVars()
+  {
+      processNumInternalVars();
+      processNumStateVars();
+      processNumStoreVars();
+      processNumBranchDataVars();
+      processNumBranchDataVarsIfAllocated();
+      processTotalVars();
+  }
+
+  void processNumInternalVars()
+  {
+
+    // parameters should be processed first
+    assert(p_params_loaded);
+
+    // retrieve dictionary of parameters from Python module
+    numInternalVars = nb::cast<int>(device.attr("_pymi_bind")("processNumInternalVars")());
+
+  }
+
+  void processNumStateVars()
+  {
+
+    // parameters should be processed first
+    assert(p_params_loaded);
+
+    // retrieve dictionary of parameters from Python module
+    numStateVars = nb::cast<int>(device.attr("_pymi_bind")("processNumStateVars")());
+
+  }
+
+  void processNumStoreVars()
+  {
+
+    // parameters should be processed first
+    assert(p_params_loaded);
+
+    // retrieve dictionary of parameters from Python module
+    numStoreVars = nb::cast<int>(device.attr("_pymi_bind")("processNumStoreVars")());
+
+  }
+  
+  void processNumBranchDataVars()
+  {
+
+    // parameters should be processed first
+    assert(p_params_loaded);
+
+    // retrieve dictionary of parameters from Python module
+    numBranchDataVars = nb::cast<int>(device.attr("_pymi_bind")("processNumBranchDataVars")());
+
+  }
+
+  void processNumBranchDataVarsIfAllocated()
+  {
+
+    // parameters should be processed first
+    assert(p_params_loaded);
+
+    // retrieve dictionary of parameters from Python module
+    numBranchDataVarsIfAllocated
+        = nb::cast<int>(device.attr("_pymi_bind")("processNumBranchDataVarsIfAllocated")());
+
+  }
+
+  void processTotalVars()
+  {
+
+    // parameters should be processed first
+    assert(p_params_loaded);
+
+    // numVars = numExternalVars + numInternalVars; both keys are already
+    // populated in i_params by setNumExternalVars and processNumInternalVars.
+    int numExt = nb::cast<int>(device.attr("i_params")["numExternalVars"]);
+    int numInt = nb::cast<int>(device.attr("i_params")["numInternalVars"]);
+    device.attr("i_params")["numVars"] = numExt + numInt;
+
+  }
+
+  void processJacStamp()
+  {
+
+    assert(s_params_loaded);
+    assert(p_params_loaded);
+
+    // get dimensions of jacStamp from Python
+    // return a 1D array equal to the number of variables
+    nb::object result = device.attr("_pymi_bind")("getJacStampSize")();
+    if (!result.is_valid() || result.is_none()) {
+        throw std::runtime_error("getJacStampSize returned None or an invalid object");
+    }
+    auto jacStamp_size = nb::cast<nb::ndarray<int32_t, nb::numpy> >(result);
+
+    if (jacStamp_size.size() > 0) {
+        // resize jacStamp to these sizes
+        jacStamp.resize(jacStamp_size.size());
+        int* py_jacStamp_size_ptr = jacStamp_size.data();
+        for (size_t i=0; i<jacStamp_size.size(); ++i) {
+            jacStamp[i].resize(py_jacStamp_size_ptr[i]);
+        }
+
+        // allocates new buffers for each row from heap
+        py_jacStamp = get_list_of_memoryviews(jacStamp);
+        device.attr("jacStamp") = py_jacStamp;
+
+        // enter back into Python to fill them in
+        nb::object result = device.attr("_pymi_bind")("setJacStamp")();
+    }
+
+    // mark jacStampSet as complete
+    jacStampSet = true;
+  }
+
+  void processErrorWeightMask()
+  {
+    nb::object result = device.attr("_pymi_bind")("setErrorWeightMask")();
+    if (!result.is_valid() || result.is_none()) {
+        return;
+    }
+    auto weight_mask = nb::cast<nb::ndarray<double, nb::numpy>>(result);
+
+    if (weight_mask.size() > 0) {
+        errorWeightMask.resize(weight_mask.size());
+        auto data_ptr = static_cast<double*>(weight_mask.data());
+        for (size_t i=0; i<weight_mask.size(); ++i) {
+            errorWeightMask[i] = data_ptr[i];
+        }
+    }
+  }
+
+  void finalize() {
+    nb::object result = device.attr("_pymi_bind")("finalize")();
+    device = nb::none();
+  }
+
+};
+
+
+/// Driver for Python Model Interface
+///
+/// This program will enable running normal Xyce netlists as well as netlists 
+/// containing devices defined in Python files.
+///
+/// The Python devices will only be recognized if they're given specific
+/// names, because we are not implenting a clever name scanner here.
+///
+/// The program will recognize these devices in the netlist based on their names.
+///
+/// YGENEXT PY* <node1> <node2> <node...> <node_n>
+///
+/// MODULENAME string parameters must be added to the instance lines in the netlist
+/// using "SPARAMS".
+/// 
+/// Additional parameters {boolean, double, integer, string} can be specified in 
+/// the netlist using {BPARAMS, DPARAMS, IPARAMS, SPARAMS}. Additionally, 
+/// parameters can be specified in the .py files defining a class which inherits
+/// from the Python BaseDevice class by introducing them in the processPythonParams()
+/// function. Depending on the type of the parameters {boolean, double, integer, string},
+/// the parameters will be merged respectively into {BPARAMS, DPARAMS, IPARAMS, SPARAMS}.
+/// Precedence is given for parameter values in the netlist.
+///
+/// @note  A parser limitation of Xyce requires that a model be specified
+/// any time any more than 2 nodes are given to the YGENEXT device.
+/// This is true even though the YGenExt device has no model parameters.
+/// A null model card like:
+/// .model dummy genext ()
+/// is sufficient to get past this limitation
+int main(int argc, char **argv)
+{
+
+  // register the embedded XyceObjects module, then begin Python interpreter
+  if (PyImport_AppendInittab("XyceObjects", &PyInit_XyceObjects) == -1) {
+    fprintf(stderr, "Fatal: could not register the 'XyceObjects' built-in module\n");
+    exit(1);
+  }
+  Py_Initialize();
+  bool debug=false;
+
+  Xyce::Circuit::Simulator::RunStatus run_status=Xyce::Circuit::Simulator::SUCCESS;
+
+  // Here is where we create the simulator object we will use to run Xyce
+  Xyce::Circuit::GenCouplingSimulator xyce;
+
+  // Now we pass our command line arguments into Xyce's first initialization step
+  run_status=xyce.initializeEarly(argc,argv);
+  if (run_status==Xyce::Circuit::Simulator::ERROR) exit(1);
+  if (run_status==Xyce::Circuit::Simulator::DONE) exit(0);
+
+  // We now must query Xyce for any general external devices present in the
+  // netlist we just parsed.
+  std::vector<std::string> deviceNames_YGENEXT;
+  std::vector<std::string> deviceNames_YPY;
+  std::vector<std::string> deviceNames;
+
+  bool bsuccess=xyce.getDeviceNames("YGENEXT",deviceNames_YGENEXT);
+  // bsuccess|=xyce.getDeviceNames("YPY",deviceNames_YPY);
+  deviceNames.insert( deviceNames.end(), deviceNames_YGENEXT.begin(), deviceNames_YGENEXT.end() );
+  //deviceNames.insert( deviceNames.end(), deviceNames_YPY.begin(), deviceNames_YPY.end() );
+  if (!bsuccess && debug)
+  {
+    std::cout << " No external devices found.. regular xyce netlist." << std::endl;
+  }
+
+  // Create instances of the vector loader classes we have defined
+  std::vector<pythonVectorCompute> pvcs(deviceNames.size());
+
+  const std::string xyce_filepath    = xyce.getXyceFilePath();
+  const std::string netlist_filepath = xyce.getNetlistFilePath();
+
+  {
+
+  // acquire the Python GIL
+  nb::gil_scoped_acquire lifecycle_gil;
+
+
+  // Now scan our list of general external devices, and find the ones we recognize.
+  // For each recognized device, associate one of our vector loaders and set any
+  // other special parameters
+  for (int i =0; i<deviceNames.size(); i++)
+  {
+
+    // Retrieve any double precision parameters that may be on the instance line
+    std::vector<std::string> pNames;
+    std::vector<double> dValues;
+    bsuccess=xyce.getDParams(deviceNames[i],pNames,dValues);
+    if (!bsuccess)
+    {
+      std::cerr << " getDParams failed on " << deviceNames[i] << std::endl;
+      exit(1);
+    }
+    // pass those parameters to our object
+    pvcs[i].processDoubleParams(pNames,dValues);
+
+    std::vector<int> iValues;
+    bsuccess=xyce.getIParams(deviceNames[i],pNames,iValues);
+    if (!bsuccess)
+    {
+      std::cerr << " getIParams failed on " << deviceNames[i] << std::endl;
+      exit(1);
+    }
+    // pass those parameters to our object
+    pvcs[i].processIntegerParams(pNames,iValues);
+
+    std::vector<bool> bValues;
+    bsuccess=xyce.getBParams(deviceNames[i],pNames,bValues);
+    if (!bsuccess)
+    {
+      std::cerr << " getBParams failed on " << deviceNames[i] << std::endl;
+      exit(1);
+    }
+    // pass those parameters to our object
+    pvcs[i].processBoolParams(pNames,bValues);
+
+    // set filepaths for xyce and the netlist file
+    pvcs[i].setFilePaths(xyce_filepath, netlist_filepath);
+
+    std::vector<std::string> sValues;
+    bsuccess=xyce.getSParams(deviceNames[i],pNames,sValues);
+    if (!bsuccess)
+    {
+      std::cerr << " getSParams failed on " << deviceNames[i] << std::endl;
+      exit(1);
+    }
+    // pass those parameters to our object
+    pvcs[i].processStringParams(pNames,sValues);
+
+    // have our object retrieve python dictionary
+    pvcs[i].processPythonParams();
+
+    // populate number of external variables
+    pvcs[i].setNumExternalVars(xyce.getNumExtVars(deviceNames[i]));
+
+    // populate number of internal variables from python
+    pvcs[i].processVars();
+
+    bsuccess=xyce.setNumInternalVars(deviceNames[i],pvcs[i].numInternalVars);
+    if (!bsuccess)
+    {
+      std::cerr << " Failed to set internal vars for" << deviceNames[i]
+                << std::endl;
+      exit(1);
+    }
+
+    bsuccess=xyce.setNumStateVars(deviceNames[i],pvcs[i].numStateVars);
+    if (!bsuccess)
+    {
+      std::cerr << " Failed to set state vars for" << deviceNames[i]
+                << std::endl;
+      exit(1);
+    }
+
+    bsuccess=xyce.setNumStoreVars(deviceNames[i],pvcs[i].numStoreVars);
+    if (!bsuccess)
+    {
+      std::cerr << " Failed to set store vars for" << deviceNames[i]
+                << std::endl;
+      exit(1);
+    }
+
+    // numBranchDataVars and numBranchDataVarsIfAllocated are set during initializeEarly
+    // they can not be set here
+    //
+    // setting numBranches is problematic, because it would likely be set to 0
+    // and then the vars if allocated would give it the amount to increment by
+    // however, the DeviceMgr::addDeviceInstance Enabling lead current load for device
+    // DeviceInstance::enableLeadCurrentCalc() being called much earlier
+    // (won't be recalculated)
+    //bsuccess=xyce.setNumBranchDataVars(deviceNames[i],pvcs[i].numBranchDataVars);
+    //if (!bsuccess)
+    //{
+    //  std::cerr << " Failed to set branch data vars for" << deviceNames[i]
+    //            << std::endl;
+    //  exit(1);
+    //}
+
+    //bsuccess=xyce.setNumBranchDataVarsIfAllocated(deviceNames[i],pvcs[i].numBranchDataVarsIfAllocated);
+    //if (!bsuccess)
+    //{
+    //  std::cerr << " Failed to set branch data vars if allocated for" << deviceNames[i]
+    //            << std::endl;
+    //  exit(1);
+    //}
+
+    // generate jacStamp, if defined
+    pvcs[i].processJacStamp();
+
+    if (pvcs[i].jacStamp.size() > 0) {
+      printf("jacStamp > 0, setting larger for %s\n", deviceNames[i].c_str());
+      // If we have implemented this device so it can use a sparse jacobian stamp, tell
+      // Xyce what that stamp is.
+      bsuccess=xyce.setJacStamp(deviceNames[i],pvcs[i].jacStamp);
+      if (!bsuccess)
+      {
+        std::cerr << " Failed to set Jacobian Stamp for " << deviceNames[i]
+                  << std::endl;
+        exit(1);
+      }
+    }
+
+    // set error weight mask, if defined
+    pvcs[i].processErrorWeightMask();
+    if (pvcs[i].errorWeightMask.size() > 0) {
+      bsuccess=xyce.setErrorWeightMask(deviceNames[i],pvcs[i].errorWeightMask);
+      if (!bsuccess)
+      {
+        std::cerr << " Failed to set error weight mask for internal variables for " << deviceNames[i]
+                  << std::endl;
+        exit(1);
+      }
+    }
+
+
+    // Now tell Xyce to use the vector loader
+    bsuccess=xyce.setVectorLoader(deviceNames[i],&pvcs[i]);
+    if (!bsuccess)
+    {
+      std::cerr << " Failed to set vector loader for " << deviceNames[i]
+                << std::endl;
+      exit(1);
+    }
+
+  }
+
+  // All of our recognized general external devices are completely set up, it is now
+  // safe to finish initialization
+  run_status=xyce.initializeLate();
+  if (run_status==Xyce::Circuit::Simulator::ERROR) exit(1);
+  if (run_status==Xyce::Circuit::Simulator::DONE) exit(0);
+
+  // Now we simply let Xyce run the simulation to completion.
+  // Our objects will be called as needed throughout the run.
+  // A more complex interaction could use the "simulateUntil"
+  // method to make Xyce run only for a small time span and
+  // return control to this calling program.
+  try
+  {
+    run_status = xyce.runSimulation();
+  }
+  catch (std::exception &x)
+  {
+    run_status=Xyce::Circuit::Simulator::ERROR;
+  }
+
+
+  // the "finalize" function closes output files and
+  // releases memory.
+  if (run_status != Xyce::Circuit::Simulator::DONE)
+  {
+    try
+    {
+      xyce.finalize();
+    }
+    catch (std::exception &x)
+    {
+      run_status = Xyce::Circuit::Simulator::ERROR;
+    }
+  }
+  for (int i =0; i<deviceNames.size(); i++)
+  {
+    pvcs[i].finalize();
+  }
+  pvcs.clear();
+  }
+
+  Py_Finalize();
+  exit ((run_status==Xyce::Circuit::Simulator::ERROR)?1:0);
+}

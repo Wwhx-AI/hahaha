@@ -1,0 +1,236 @@
+include:
+  - gitlab-ci/variables/build-var-sets.yml
+
+.build_tpls:
+  extends: .build_base
+  dependencies: []
+  stage: buildTPLs
+  script:
+    # clone relevant repos
+    - |
+      hostname
+      if [ ! -d SuiteSparse ]; then
+        git clone "https://github.com/DrTimothyAldenDavis/SuiteSparse.git"
+      fi
+      if [ ! -d Trilinos ]; then
+        git clone "git@cee-gitlab.sandia.gov:ramsesmodsim/devops/Trilinos.git"
+      fi
+      if [ ! -d ADMS ]; then
+        git clone "git@cee-gitlab.sandia.gov:Xyce/auxiliary/ADMS.git"
+      fi
+      # for ADC usage logging capability
+      if [ ! -d Adiak ]; then
+        git clone "https://github.com/LLNL/Adiak.git"
+        git -C Adiak submodule init
+        git -C Adiak submodule update
+      fi
+      if [ ! -d adct-cxx ]; then
+        git clone "https://github.com/sandialabs/adct-cxx.git"
+      fi
+    #########################################################################
+    #########################################################################
+    # build ADMS
+    - cd ${CI_PROJECT_DIR}/ADMS
+    - git checkout ${ADMS_VERSION} || (echo "Failed to checkout ADMS version ${ADMS_VERSION}";exit 1)
+    - git pull || true # if ADMS_VERSION is a tag this will fail, so ignore
+    - mkdir -p ${CI_PROJECT_DIR}/build/adms
+    - cd ${CI_PROJECT_DIR}/build/adms
+    - |
+      cmake \
+        -GNinja \
+        -DCMAKE_BUILD_TYPE=${cmakeBuildType} \
+        -DCMAKE_INSTALL_PREFIX="${admsInstallDir}/${optStr}" \
+        "${CI_PROJECT_DIR}/ADMS"
+    - cmake --build .
+    - cmake --install .
+    #########################################################################
+    #########################################################################
+    # build Adiak and adct-cxx (usage data logging)
+    - |
+      cd ${CI_PROJECT_DIR}/Adiak
+      git checkout -f ${ADIAK_VERSION} || (echo "Failed to checkout Adiak version ${ADIAK_VERSION}";exit 1)
+      git pull || true
+      # has "blt" as a submodule
+      git submodule update || true
+      mkdir -p "${CI_PROJECT_DIR}/build/adiak"
+      cd "${CI_PROJECT_DIR}/build/adiak"
+      cmake -GNinja \
+        -DCMAKE_C_COMPILER=${MyCC} \
+        -DCMAKE_CXX_COMPILER=${MyCXX} \
+        -DBUILD_SHARED_LIBS="${buildShared}" \
+        -DENABLE_EXAMPLES="OFF" \
+        -DENABLE_DOCS="OFF" \
+        -DENABLE_GTEST="OFF" \
+        -DENABLE_TESTS="OFF" \
+        -DBLT_CXX_STD="c++17" \
+        -DENABLE_MPI=${BuildWithMPI} \
+        -DCMAKE_BUILD_TYPE=${cmakeBuildType} \
+        -DCMAKE_INSTALL_PREFIX="${adiakInstallDir}/${optStr}/${libTypeStr}" \
+        -DBLT_SOURCE_DIR="${CI_PROJECT_DIR}/Adiak/blt" \
+        "${CI_PROJECT_DIR}/Adiak"
+      cmake --build .
+      cmake --install .
+    - |
+      cd ${CI_PROJECT_DIR}/adct-cxx
+      git checkout -f ${ADCT_VERSION} || (echo "Failed to checkout ADMS version ${ADCT_VERSION}";exit 1)
+      git pull || true # if ADCT_VERSION is a tag this will fail, so ignore
+      mkdir -p ${CI_PROJECT_DIR}/build/adc
+      cd ${CI_PROJECT_DIR}/build/adc
+      cmake -GNinja \
+        -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
+        -DCMAKE_C_COMPILER=${MyCC} \
+        -DENABLE_GTEST="OFF" \
+        -DENABLE_EXAMPLES="OFF" \
+        -DENABLE_TESTS="OFF" \
+        -DBLT_CXX_STD="c++17" \
+        -DCMAKE_CXX_COMPILER=${MyCXX} \
+        -DBUILD_SHARED_LIBS="${buildShared}" \
+        -DCMAKE_BUILD_TYPE=${cmakeBuildType} \
+        -DBLT_SOURCE_DIR="${CI_PROJECT_DIR}/Adiak/blt" \
+        -DENABLE_MPI=${BuildWithMPI} \
+        -DCMAKE_INSTALL_PREFIX="${adcInstallDir}/${optStr}/${libTypeStr}" \
+        -Dadiak_DIR="${adiakInstallDir}/${optStr}/${libTypeStr}/lib/cmake/adiak" \
+        "${CI_PROJECT_DIR}/adct-cxx"
+      cmake --build .
+      cmake --install .
+    #########################################################################
+    #########################################################################
+    # Uses Intel MKL for BLAS/LAPACK
+    #########################################################################
+    # build SuiteSparse
+    - cd ${CI_PROJECT_DIR}/SuiteSparse
+    - git checkout ${SuiteSparseVersion} || (echo "Failed to checkout SuiteSparse version ${SuiteSparseVersion}";exit 1)
+    # build ss_cfg component of SuiteSparse
+    - mkdir -p ${CI_PROJECT_DIR}/build/ss
+    - cd ${CI_PROJECT_DIR}/build/ss
+    - |
+      cmake -GNinja \
+        -DBLA_STATIC="${buildShared}" \
+        -DBLA_VENDOR="Intel10_64lp_seq" \
+        -DCMAKE_BUILD_TYPE=${cmakeBuildType} \
+        -DSUITESPARSE_USE_OPENMP="${BuildWithMPI}" \
+        -DSUITESPARSE_USE_64BIT_BLAS="ON" \
+        -DSUITESPARSE_USE_FORTRAN="OFF" \
+        -DCMAKE_INSTALL_RPATH="${ssInstallDir}/${optStr}/${libTypeStr}/lib64" \
+        -DCMAKE_INSTALL_PREFIX="${ssInstallDir}/${optStr}/${libTypeStr}" \
+        -DCMAKE_POSITION_INDEPENDENT_CODE="ON" \
+        -DBUILD_SHARED_LIBS="${buildShared}" \
+        -DBUILD_STATIC_LIBS="$([ "buildShared" = "ON" ] && echo "OFF" || echo "ON")" \
+        -DSUITESPARSE_ENABLE_PROJECTS="suitesparse_config;amd" \
+        "${CI_PROJECT_DIR}/SuiteSparse"
+    - cmake --build .
+    - cmake --install .
+    #########################################################################
+    #########################################################################
+    # build trilinos
+    - cd ${CI_PROJECT_DIR}/Trilinos
+    - git checkout -f ${TRILINOS_VERSION} || (echo "Failed to checkout Trilinos version ${TRILINOS_VERSION}";exit 1)
+    - |
+      mkdir -p ${CI_PROJECT_DIR}/build/trilinos
+      cd ${CI_PROJECT_DIR}/build/trilinos
+      cmakeExtraArgs="-GNinja;"
+      cmakeExtraArgs+="-DAMD_LIBRARY_DIRS=${ssInstallDir}/${optStr}/${libTypeStr}/lib64;"
+      cmakeExtraArgs+="-DAMD_INCLUDE_DIRS=${ssInstallDir}/${optStr}/${libTypeStr}/include/suitesparse;"
+      cmakeExtraArgs+="-DAMD_LIBRARY_NAMES=amd\;suitesparseconfig;"
+      cmakeExtraArgs+="-DCMAKE_INSTALL_PREFIX=${trilinosInstallDir}/${optStr}/${libTypeStr};"
+      cmakeExtraArgs+="-DCMAKE_POSITION_INDEPENDENT_CODE=ON;"
+      cmakeExtraArgs+="-DTrilinos_USE_GNUINSTALLDIRS=ON;"
+      cmakeExtraArgs+="-DCMAKE_BUILD_TYPE=${cmakeBuildType}"
+      # generate a concise version of trilinos for reporting
+      export WORKSPACE="${CI_PROJECT_DIR}"
+      shortTriVer=$(echo "${TRILINOS_VERSION}"|sed 's/trilinos-release-//'|sed 's/-/./g')
+      ctest -DVERBOSITY=5 -DGROUP="Deploy" \
+        -DBUILD_SHARED="${buildShared}" \
+        -DBUILD_WITH_MPI="${BuildWithMPI}" \
+        -DBUILD_NAME="Trilinos/${shortTriVer}/${optStr}/${libTypeStr}-${archFullName}" \
+        -DBUILD_DIR="${CI_PROJECT_DIR}/build/trilinos" \
+        -DCMAKE_ARGS_LIST="${cmakeExtraArgs}" \
+        -DSITE_APPEND="" \
+        -S "${CI_PROJECT_DIR}/cmake/ctest/trilinos-ctest.cmake"
+    - cmake --install .
+  artifacts:
+    paths:
+      - build/trilinos/Testing/Temporary
+    expire_in: 1 month
+  rules:
+    - if: '$DO_TPL_BUILDS == "true" && $CI_PIPELINE_SOURCE == "trigger"'
+
+GNU_serial.buildTPLs:
+  needs:
+    - job: GNU_serial.cleanup
+      artifacts: false
+  extends:
+    - .build_tpls
+    - .gnu_serial_vars
+  parallel:
+    matrix:
+      - buildShared: ["ON", "OFF"]
+        cmakeBuildType: ["Debug", "Release"]
+
+GNU_OpenMPI.buildTPLs:
+  extends:
+    - .build_tpls
+    - .gnu_openmpi_vars
+  needs:
+    - job: GNU_OpenMPI.cleanup
+      artifacts: false
+  parallel:
+    matrix:
+      - buildShared: ["ON", "OFF"]
+        cmakeBuildType: ["Debug", "Release"]
+
+Intel_serial.buildTPLs:
+  needs:
+    - job: Intel_serial.cleanup
+      artifacts: false
+  extends:
+    - .build_tpls
+    - .intel_serial_vars
+  parallel:
+    matrix:
+      - buildShared: ["ON", "OFF"]
+        cmakeBuildType: ["Release"]
+
+Intel_OpenMPI.buildTPLs:
+  needs:
+    - job: Intel_OpenMPI.cleanup
+      artifacts: false
+  extends:
+    - .build_tpls
+    - .intel_openmpi_vars
+  parallel:
+    matrix:
+      - buildShared: ["ON", "OFF"]
+        cmakeBuildType: ["Release"]
+
+GNU_OpenMPI.cts.buildTPLs:
+  needs:
+    - job: GNU_OpenMPI.cts.cleanup
+      artifacts: false
+  extends:
+    - .build_tpls
+    - .gnu_openmpi_cts_vars
+
+GNU_serial.cts.buildTPLs:
+  needs:
+    - job: GNU_serial.cts.cleanup
+      artifacts: false
+  extends:
+    - .build_tpls
+    - .gnu_serial_cts_vars
+
+Intel_OpenMPI.cts.buildTPLs:
+  needs:
+    - job: Intel_OpenMPI.cts.cleanup
+      artifacts: false
+  extends:
+    - .build_tpls
+    - .intel_openmpi_cts_vars
+
+Intel_serial.cts.buildTPLs:
+  needs:
+    - job: Intel_serial.cts.cleanup
+      artifacts: false
+  extends:
+    - .build_tpls
+    - .intel_serial_cts_vars
